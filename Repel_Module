@@ -1,0 +1,201 @@
+--[[
+	Creator: GameFlame232
+	
+	Created: 2024/10/08
+	Last Changed: 2024/10/08
+	
+	Name: Repel
+	Description: A module which allows to repel marked blocks for a cool effect.
+]]
+
+-- Services
+local Players = game:GetService("Players")
+local CollectionService = game:GetService("CollectionService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Connections
+local RepelConnection = nil
+
+-- Storage
+local MovedParts = {}
+local Camera = workspace.CurrentCamera
+local BlastProjectile = ReplicatedStorage.Assets.Projectile
+
+-- Config
+local REPEL_EASING = Enum.EasingStyle.Quart
+local REPEL_SPEED = 10 -- distance/speedModifier
+local RETURN_TIME = 1
+
+--======================--
+
+local module = {}
+
+-- Public Storage
+module.Repeller = {} --< Array with meshparts
+module.Effected = {} --< Array with meshparts
+
+module.MinHeight = 3
+module.MinHeightBuffer = 2
+module.MaxHeight = 100
+module.MaxHeightBuffer = 2
+module.RotationBuffer = 180
+
+module.RepelDistance = 25
+module.PlrRange = 20
+
+
+--======================--
+-- Privat Methods
+--======================--
+
+
+local function MouseRay(params)
+	local mousePosition = UserInputService:GetMouseLocation()
+	local mouseRay = Camera:ViewportPointToRay(mousePosition.X,mousePosition.Y)
+	local raycasResult = workspace:Raycast(mouseRay.Origin, mouseRay.Direction * 1000, params)
+
+	return raycasResult, mouseRay.Origin, mouseRay.Direction
+end
+
+local function GetRandomRotation() : CFrame
+	local rotationX = math.random(0, module.RotationBuffer)
+	local rotationY = math.random(0, module.RotationBuffer)
+	local rotationZ = math.random(0, module.RotationBuffer)
+	return CFrame.Angles(rotationX, rotationY, rotationZ)
+end
+
+local function Return(effected : MeshPart)
+	-- Get the original cframe
+	if not MovedParts[effected] then return end
+	local OriginalCFrame = MovedParts[effected].OriginalCFrame
+	
+	-- Create a return tween
+	local distance = (effected.Position - OriginalCFrame.Position).Magnitude
+	local tweenDuration = distance/REPEL_SPEED
+	local tweenGoal = {CFrame = OriginalCFrame}
+	local newTween = TweenService:Create(effected, TweenInfo.new(tweenDuration, REPEL_EASING), tweenGoal)
+	
+	-- Update and play the tween
+	MovedParts[effected].Tween = newTween
+	newTween:Play()
+	
+	-- If the tween is finished then delete the part out of the moving table
+	newTween.Completed:Once(function()
+		if newTween.PlaybackState == Enum.PlaybackState.Completed then
+			MovedParts[effected] = nil
+		end		
+	end)
+end
+
+local function Repel(repeller : MeshPart, effected : MeshPart, distance : number)
+	local direction = (effected.Position - repeller.Position).Unit
+	local randomRotation = GetRandomRotation()
+	local newPosition = (direction * module.RepelDistance) + effected.Position
+	
+	-- Check if the new position is within the set parameters
+	if newPosition.Y < module.MinHeight then
+		local newY = module.MinHeight + math.random(0, module.MinHeightBuffer)
+		newPosition = Vector3.new(newPosition.X, newY, newPosition.Z)
+	elseif newPosition.Y > module.MaxHeight then
+		local newY = module.MaxHeight + math.random(0, module.MaxHeightBuffer)
+		newPosition = Vector3.new(newPosition.X, newY, newPosition.Z)
+	end
+	
+	-- Prepare the repel tween
+	local tweenGoal = {
+		CFrame = CFrame.new(newPosition) * randomRotation
+	}
+	local tweenDuration = distance/REPEL_SPEED
+	local newTween = TweenService:Create(effected, TweenInfo.new(tweenDuration, REPEL_EASING), tweenGoal)
+	
+	-- Create a table with the objects tween and orginial cframe
+	local partInfo = {
+		OriginalCFrame = effected.CFrame,
+		Tween = newTween,
+		Return = task.delay(tweenDuration + RETURN_TIME, function() Return(effected) end)
+	}
+	
+	-- If part was already moved then ...
+	if MovedParts[effected] then
+		-- ... cancle the tween if playing
+		if MovedParts[effected].Tween.PlaybackState == Enum.PlaybackState.Playing then
+			MovedParts[effected].Tween:Cancel()
+		end
+		
+		-- ... cancle the delayed return function
+		task.cancel(MovedParts[effected].Return)
+		
+		-- ... overwrite the original cframe
+		partInfo.OriginalCFrame = MovedParts[effected].OriginalCFrame
+	end
+	
+	-- Store new information and play the tween
+	newTween:Play()
+	MovedParts[effected] = partInfo
+end
+
+local function RepelCheck()
+	-- Loop trough all objects which are added to repel
+	for _, repeller : MeshPart in pairs(module.Repeller) do
+		-- Loop through all objects which could get effected by the repelling force
+		for _, target : MeshPart in pairs(module.Effected) do
+			-- Check if the target is in range
+			local distance = (target.Position - repeller.Position).Magnitude
+			if distance <= module.PlrRange then
+				Repel(repeller, target, distance)
+			end
+		end
+	end
+end
+
+--======================--
+-- Public Methods
+--======================--
+
+function module:Enable()
+	-- Attach a connection to the repel check function
+	RepelConnection = RunService.Heartbeat:Connect(RepelCheck)
+end
+
+function module:Disable()
+	-- If repel is currently active then disconnect the connection
+	if RepelConnection then
+		RepelConnection:Disconnect()
+	end
+end
+
+function module:Blast(origin : Vector3, blastDistance : number?, studsPerSec : number?)
+	-- Check where the mouse points at
+	local mouseRay, direction = MouseRay()
+	if not mouseRay then return end
+
+	-- Calculate the way which the blast will travel
+	local travel = (mouseRay.Position - origin).Unit * (blastDistance or 100)
+
+	-- Create a projectile
+	local newProjectile = BlastProjectile:Clone()
+	newProjectile.CanCollide = false
+	newProjectile.Anchored = true
+	newProjectile.Position = origin
+	newProjectile.Parent = workspace
+
+	-- Add the blast to the repelling objects
+	local key = #module.Repeller + 1
+	module.Repeller[key] = newProjectile
+
+	-- Create a tween for the projectile movement
+	local tweenTime = travel.Magnitude / (studsPerSec or 30)
+	local shootTween = TweenService:Create(newProjectile, TweenInfo.new(tweenTime), {Position = origin + travel})
+	shootTween:Play()
+
+	-- Clean up when the tween is over
+	task.delay(tweenTime, function()
+		module.Repeller[key] = nil
+		newProjectile:Destroy()
+	end)
+end
+
+return module
